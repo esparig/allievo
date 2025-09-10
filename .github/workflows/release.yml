@@ -1,0 +1,154 @@
+name: Release and Publish
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      new_release_published: ${{ steps.semantic.outputs.new_release_published }}
+      new_release_version: ${{ steps.semantic.outputs.new_release_version }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install semantic-release
+        run: |
+          npm install -g semantic-release @semantic-release/changelog @semantic-release/git @semantic-release/github
+
+      - name: Create semantic-release config
+        run: |
+          cat > .releaserc.json << EOF
+          {
+            "branches": ["main"],
+            "plugins": [
+              "@semantic-release/commit-analyzer",
+              "@semantic-release/release-notes-generator",
+              "@semantic-release/changelog",
+              [
+                "@semantic-release/exec",
+                {
+                  "prepareCmd": "python scripts/update_version.py \${nextRelease.version}"
+                }
+              ],
+              [
+                "@semantic-release/git",
+                {
+                  "assets": ["CHANGELOG.md", "allievo/__init__.py", "pyproject.toml"],
+                  "message": "chore(release): \${nextRelease.version} [skip ci]\n\n\${nextRelease.notes}"
+                }
+              ],
+              "@semantic-release/github"
+            ]
+          }
+          EOF
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Create version update script
+        run: |
+          mkdir -p scripts
+          cat > scripts/update_version.py << 'EOF'
+          #!/usr/bin/env python3
+          import sys
+          import re
+          import os
+          
+          def update_version(new_version):
+              # Update version in __init__.py
+              init_file = 'allievo/__init__.py'
+              
+              with open(init_file, 'r') as f:
+                  content = f.read()
+              
+              # Replace version string
+              new_content = re.sub(
+                  r'__version__ = ["\'][^"\']*["\']',
+                  f'__version__ = "{new_version}"',
+                  content
+              )
+              
+              with open(init_file, 'w') as f:
+                  f.write(new_content)
+              
+              # Update version in pyproject.toml
+              pyproject_file = 'pyproject.toml'
+              
+              with open(pyproject_file, 'r') as f:
+                  content = f.read()
+              
+              # Replace version in pyproject.toml
+              new_content = re.sub(
+                  r'version = ["\'][^"\']*["\']',
+                  f'version = "{new_version}"',
+                  content
+              )
+              
+              with open(pyproject_file, 'w') as f:
+                  f.write(new_content)
+              
+              print(f"Updated version to {new_version} in both __init__.py and pyproject.toml")
+          
+          if __name__ == '__main__':
+              if len(sys.argv) != 2:
+                  print("Usage: update_version.py <version>")
+                  sys.exit(1)
+              
+              version = sys.argv[1]
+              update_version(version)
+          EOF
+          chmod +x scripts/update_version.py
+
+      - name: Run semantic release
+        id: semantic
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: semantic-release
+
+  publish:
+    needs: release
+    if: needs.release.outputs.new_release_published == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Build package
+        run: |
+          python -m build
+
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          python -m twine upload dist/*
